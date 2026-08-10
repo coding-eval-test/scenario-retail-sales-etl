@@ -1,0 +1,10 @@
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+markers = [
+    "S1: story - daily store sales summary",
+    "S2: story - product enrichment",
+    "B1: bug - doubled revenue after a feed resend",
+    "Regression: existing behavior that must keep working",
+]

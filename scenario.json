@@ -1,0 +1,35 @@
+{
+  "scenario": "retail-sales-etl",
+  "name": "Retail Sales ETL",
+  "templateRepo": "coding-eval-test/scenario-retail-sales-etl",
+  "projectPath": "src/retail_pipeline",
+  "docsAllowList": [
+    "build_daily_store_sales",
+    "enrich_with_products",
+    "build_category_revenue",
+    "dedupe_sales",
+    "main"
+  ],
+  "categories": [
+    {
+      "category": "S1",
+      "points": 25,
+      "label": "S1 — Daily store sales summary"
+    },
+    {
+      "category": "S2",
+      "points": 25,
+      "label": "S2 — Product enrichment"
+    },
+    {
+      "category": "B1",
+      "points": 20,
+      "label": "B1 — Doubled revenue after a feed resend"
+    },
+    {
+      "category": "Regression",
+      "points": 30,
+      "label": "Regression — existing pipeline behavior"
+    }
+  ]
+}

@@ -1,0 +1,198 @@
+name: Template health
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-shipping-state:
+    name: Verify the template ships in the intended state
+    # Template copies inherit this workflow. Only run it in the source repository.
+    if: github.repository == 'coding-eval-test/scenario-retail-sales-etl'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: UTC
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # scenario.json is the single source of truth for the work items and their
+      # points. check.sh parses it with sed, which is only safe while the file
+      # stays in jq's canonical one-key-per-line shape — so assert that first.
+      - name: scenario.json must be canonically formatted
+        shell: bash
+        run: |
+          if ! diff <(jq --indent 2 . scenario.json) scenario.json; then
+            echo "::error::scenario.json is not canonically formatted. Run: jq --indent 2 . scenario.json | sponge scenario.json"
+            exit 1
+          fi
+          echo "scenario.json is canonical."
+
+      - name: scenario.json must name this repository
+        shell: bash
+        run: |
+          declared=$(jq -r '.templateRepo' scenario.json)
+          if [ "$declared" != "${GITHUB_REPOSITORY}" ]; then
+            echo "::error::scenario.json templateRepo is '${declared}' but this repo is '${GITHUB_REPOSITORY}'."
+            echo "::error::The job guard above is keyed off the same slug — fix both together."
+            exit 1
+          fi
+          echo "templateRepo matches ${GITHUB_REPOSITORY}."
+
+      - name: README grading table must match scenario.json
+        shell: bash
+        run: |
+          {
+            echo "| Work item | Points |"
+            echo "| --- | --- |"
+            jq -r '.categories[] | "| \(.label) | \(.points) |"' scenario.json
+          } > /tmp/expected-table.md
+
+          sed -n '/<!-- grading-table:start -->/,/<!-- grading-table:end -->/p' README.md \
+            | sed '1d;$d' > /tmp/actual-table.md
+
+          if ! diff /tmp/expected-table.md /tmp/actual-table.md; then
+            echo "::error::The README grading table does not match scenario.json. Left is expected."
+            exit 1
+          fi
+          echo "README grading table matches scenario.json."
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build must succeed
+        run: python -m compileall -q src tests
+
+      # Regression is the one category with inverted semantics — it must pass —
+      # so it stays named explicitly rather than coming from the manifest loop.
+      # Its counts are checked too: an unmatched marker exits 5 with zero tests,
+      # and "green because nothing ran" must fail here, not ship. A skipped test
+      # in the template is equally a shipping bug.
+      - name: Regression suite must be green, with real tests and no skips
+        shell: bash
+        run: |
+          rm -rf reports
+          if ! python -m pytest -m Regression --junitxml=reports/Regression.xml; then
+            echo "::error::The Regression suite failed or did not run."
+            exit 1
+          fi
+          tests=$(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' reports/Regression.xml | head -1)
+          skipped=$(sed -n 's/.*<testsuite [^>]*skipped="\([0-9]*\)".*/\1/p' reports/Regression.xml | head -1)
+          executed=$(( ${tests:-0} - ${skipped:-0} ))
+          if [ "$executed" -le 0 ]; then
+            echo "::error::No tests ran for the Regression marker — the green check checked nothing."
+            exit 1
+          fi
+          if [ "${skipped:-0}" -gt 0 ]; then
+            echo "::error::${skipped} Regression test(s) are skipped — the template must not ship skips."
+            exit 1
+          fi
+          echo "Regression green with ${executed} tests."
+
+      - name: Every work item must ship red, with real tests and no skips
+        shell: bash
+        run: |
+          problems=0
+          while read -r category; do
+            rm -rf reports
+            passed=0
+            python -m pytest -m "${category}" --junitxml="reports/${category}.xml" \
+              < /dev/null > /dev/null 2>&1 && passed=1
+
+            tests=$(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' "reports/${category}.xml" 2>/dev/null | head -1)
+            skipped=$(sed -n 's/.*<testsuite [^>]*skipped="\([0-9]*\)".*/\1/p' "reports/${category}.xml" 2>/dev/null | head -1)
+            executed=$(( ${tests:-0} - ${skipped:-0} ))
+
+            # An empty category is a scenario bug: the grader would report NO TESTS
+            # and the work item would be unscoreable. Fail loudly here, in the one
+            # repo where it can still be fixed before trainees copy it.
+            if [ "$executed" -le 0 ]; then
+              echo "::error::No tests ran for marker ${category}. scenario.json and the pytest markers disagree."
+              problems=1
+            elif [ "${skipped:-0}" -gt 0 ]; then
+              echo "::error::Category ${category} ships with skipped tests."
+              problems=1
+            elif [ "$passed" -eq 1 ]; then
+              echo "::error::Category ${category} PASSES in the template. It must ship failing."
+              problems=1
+            else
+              echo "Category ${category} fails as intended (${executed} tests)."
+            fi
+          done < <(jq -r '.categories[] | select(.category != "Regression") | .category' scenario.json)
+          exit $problems
+
+      # Derived from the code rather than hardcoded, so a new scenario inherits the
+      # check for free: every def/class name declared under projectPath (private
+      # _names excluded) must stay out of the trainee-facing docs unless
+      # docsAllowList exempts it. The domain-specific half of this — the APIs a fix
+      # actually uses — lives in the private solution repo, because naming it here
+      # would leak it: this file is public.
+      - name: Docs must not leak the solution
+        shell: bash
+        run: |
+          mapfile -t allow < <(jq -r '.docsAllowList // [] | .[]' scenario.json)
+
+          srcdir=$(jq -r '.projectPath' scenario.json)
+          if [ ! -d "$srcdir" ]; then
+            echo "::error::projectPath '${srcdir}' does not exist — the leak check is not actually checking anything."
+            exit 1
+          fi
+
+          names=$(grep -rhoE '^[[:space:]]*(def|class)[[:space:]]+[A-Za-z0-9_]+' \
+                    --include='*.py' "$srcdir" \
+                  | awk '{print $NF}' | grep -v '^_' | sort -u)
+
+          for entry in "${allow[@]}"; do
+            names=$(printf '%s\n' "$names" | grep -vxF "$entry" || true)
+          done
+
+          if [ -z "$names" ]; then
+            echo "::error::No names left after the allow list — the leak check is not actually checking anything."
+            exit 1
+          fi
+
+          pattern=$(printf '%s\n' "$names" | paste -sd '|' -)
+          echo "Checking trainee-facing docs against: ${pattern}"
+
+          if grep -rnwE "$pattern" docs/ README.md; then
+            echo "::error::Implementation detail leaked into trainee-facing docs."
+            echo "::error::If a name legitimately belongs in prose, add it to docsAllowList in scenario.json."
+            exit 1
+          fi
+          echo "No solution leakage detected."
+
+  devcontainer-build:
+    name: Devcontainer must build
+    # Template copies inherit this workflow. Only run it in the source repository.
+    if: github.repository == 'coding-eval-test/scenario-retail-sales-etl'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: UTC
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # A broken devcontainer fails silently in Codespaces, which falls back to a
+      # recovery container instead of surfacing the error. Build it here so a bad
+      # devcontainer.json fails the push.
+      - name: Devcontainer must build
+        uses: devcontainers/ci@v0.3
+        with:
+          push: never

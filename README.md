@@ -14,9 +14,12 @@ Read these, in order:
 ## Stack
 
 Python 3.11 · PySpark 3.5 · pytest. The devcontainer (or a Codespace) has everything
-preinstalled — this is the supported path. Working locally instead: install a JDK 17
-and Python 3.11, then `pip install -r requirements.txt`. The pipeline and its tests
-never write files through Spark, so no Hadoop/winutils setup is needed on Windows.
+preinstalled — this is the supported path. Working locally instead: install a JDK
+Spark 3.5 supports (17 is the safe pick) and Python 3.11, then
+`pip install -r requirements.txt`, and run with `TZ=UTC` and `PYTHONPATH=src` in the
+environment. On Windows, Spark's local file reads additionally need Hadoop's winutils
+(`HADOOP_HOME` with `winutils.exe` and `hadoop.dll` on `PATH`) — if that sounds like a
+chore, use the devcontainer.
 
 ## Getting started
 
